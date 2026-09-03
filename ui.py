@@ -856,7 +856,7 @@ class MainWindow(QMainWindow):
             now = QDateTime.currentDateTimeUtc().toString(Qt.DateFormat.ISODate)
             cooldown_until_ts = QDateTime.currentDateTimeUtc().addSecs(
                 self.config.cooldown_seconds
-            ).toString(Qt.DateFormat.ISOFormat)
+            ).toString(Qt.DateFormat.ISODate)
             self.db.set_active(acc_id)
             self.db.update_account(
                 acc_id,
