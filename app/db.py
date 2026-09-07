@@ -31,6 +31,10 @@ class Database:
             self.conn.execute("SELECT is_active FROM accounts LIMIT 1")
         except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE accounts ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0")
+        columns = {row[1] for row in self.conn.execute('PRAGMA table_info(accounts)')}
+        for name in ('usage_json', 'usage_checked_at', 'usage_error', 'usage_attempted_at'):
+            if name not in columns:
+                self.conn.execute(f'ALTER TABLE accounts ADD COLUMN {name} TEXT')
         self.conn.commit()
 
     def add_account(self, name, token):
@@ -47,8 +51,11 @@ class Database:
         self.conn.commit()
 
     def update_account(self, account_id, **kwargs):
-        allowed = {"name", "token", "in_rotation", "is_active", "cooldown_until", "last_used_at"}
+        allowed = {"name", "token", "in_rotation", "is_active", "cooldown_until", "last_used_at",
+                   "usage_json", "usage_checked_at", "usage_error", "usage_attempted_at"}
         fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if 'token' in fields:
+            fields.update(usage_json=None, usage_checked_at=None, usage_error=None, usage_attempted_at=None)
         if not fields:
             return
         fields["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -73,19 +80,26 @@ class Database:
         ).fetchone()
 
     def get_next_available(self):
-        """Get the next account in rotation that is not on cooldown."""
-        now = datetime.now(timezone.utc).isoformat()
-        return self.conn.execute(
+        """Prefer fresh capacity, excluding known limits and local cooldowns."""
+        candidates = self.conn.execute(
             """SELECT * FROM accounts
                WHERE in_rotation = 1
                  AND is_active = 0
-                 AND (cooldown_until IS NULL OR cooldown_until <= ?)
                ORDER BY
                  CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END,
                  last_used_at ASC
-               LIMIT 1""",
-            (now,),
-        ).fetchone()
+               """,
+        ).fetchall()
+        from app.usage import usage_view
+        ranked = []
+        for account in candidates:
+            usage = usage_view(account)
+            if usage['blocked']:
+                continue
+            rank = {'Ready': 0, 'Nearly used up': 1}.get(usage['state'], 2)
+            ranked.append((rank, -usage['remaining'] if rank < 2 else 0, account))
+        ranked.sort(key=lambda value: value[:2])
+        return ranked[0][2] if ranked else None
 
     def toggle_rotation(self, account_id):
         row = self.conn.execute(
